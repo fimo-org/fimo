@@ -9,6 +9,7 @@
 - ✅ RFC 4180-compliant CSV parsing (including headers, quoting, escaped quotes)
 - 🛠️ Field mapping via YAML configuration
 - 🧠 Custom transformation logic using [MiniJinja](https://docs.rs/minijinja/)
+- 🔁 Supports complex templated pipelines for update and upsert operations, enabling aggregation logic and fine-grained control over MongoDB document modifications.
 - 📦 MongoDB insert, update, and upsert support
 - 🧪 Validate-only and dry-run modes
 - 🔄 Batch processing support for large files
