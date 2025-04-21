@@ -197,4 +197,3 @@ Fimo is fully compatible with RFC 4180:
 ## 📜 License
 
 MIT © 
-Website: https://fimo.org
