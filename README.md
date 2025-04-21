@@ -1,4 +1,4 @@
-# Fimo (File Mongo)
+# fimo (file-mongo)
 
 **Fimo** is a fast and flexible CLI tool written in Rust that transforms CSV data into MongoDB documents using YAML-based field mappings and Jinja2-style templating. It's ideal for bulk inserts, updates, and upserts with full control over document structure.
 
@@ -28,8 +28,8 @@ cargo install fimo
 Or clone and build:
 
 ```bash
-git clone https://github.com/youruser/file-mongo.git
-cd file-mongo/fimo
+git clone https://github.com/fimo-org/fimo.git
+cd fimo
 cargo build --release
 
 ````
