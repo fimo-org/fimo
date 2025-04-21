@@ -1,0 +1,17 @@
+[package]
+name = "fimo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+csv = "1.2"
+bson = "2.8"
+mongodb = "3.1.1"
+minijinja = { version = "1.0.12", features = ["builtins","loader"] }
+anyhow = "1.0"
+

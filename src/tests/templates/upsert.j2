@@ -1,0 +1,11 @@
+{
+  "filter": { "_id": {{ row._id }} },
+  "update": {
+    "$set": {
+      "price": {{ row.price }},
+      "created_at": {{ row.created_at }},
+      "name": "{{ row.name }}"
+    }
+  },
+  "upsert": true
+}

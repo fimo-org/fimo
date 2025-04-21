@@ -1,0 +1,8 @@
+_id:
+  type: objectId
+price:
+  type: decimal
+created_at:
+  type: date
+name:
+  type: string
