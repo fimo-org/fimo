@@ -1,4 +1,3 @@
-// src/mapping.rs
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -14,9 +13,11 @@ pub struct FieldDef {
     pub truthy: Option<Vec<String>>,
     #[serde(default)]
     pub falsy: Option<Vec<String>>,
+    #[serde(default)]
+    pub formats: Option<Vec<String>>, // Date format patterns, used for "date" type fields
 }
 
 pub fn requires_extended_json(mapping: &FieldMapping) -> bool {
     const BSON_TYPES: [&str; 6] = ["objectId", "date", "decimal", "regex", "timestamp", "binary"];
     mapping.0.values().any(|f| BSON_TYPES.contains(&f.r#type.as_str()))
-} 
+}

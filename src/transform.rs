@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use minijinja::{Environment, context};
 use std::collections::HashMap;
 use std::str::FromStr;
+use chrono::{NaiveDateTime, TimeZone, Utc};
 
 pub fn validate_required_fields(record: &HashMap<String, String>, mapping: &FieldMapping) -> Result<()> {
     for (key, field_def) in &mapping.0 {
@@ -54,9 +55,26 @@ pub fn apply_mapping(record: &HashMap<String, String>, mapping: &FieldMapping, r
                 "objectId" => ObjectId::parse_str(value)
                     .map(Bson::ObjectId)
                     .map_err(|_| anyhow!("Row {}: Failed to parse '{}' as ObjectId for field '{}'", row_num, value, key))?,
-                "date" => DateTime::parse_rfc3339_str(value)
-                    .map(Bson::DateTime)
-                    .map_err(|_| anyhow!("Row {}: Failed to parse '{}' as ISODate for field '{}'", row_num, value, key))?,
+                "date" => {
+                    if let Some(formats) = &def.formats {
+                        let mut parsed = None;
+                        for fmt in formats {
+                            if let Ok(ndt) = NaiveDateTime::parse_from_str(value, fmt) {
+                                parsed = Some(Bson::DateTime(DateTime::from_chrono(Utc.from_utc_datetime(&ndt))));
+                                break;
+                            }
+                        }
+                        if let Some(date) = parsed {
+                            date
+                        } else {
+                            return Err(anyhow!("Row {}: Could not parse '{}' with any format for field '{}'", row_num, value, key));
+                        }
+                    } else {
+                        DateTime::parse_rfc3339_str(value)
+                            .map(Bson::DateTime)
+                            .map_err(|_| anyhow!("Row {}: Failed to parse '{}' as ISODate for field '{}'", row_num, value, key))?
+                    }
+                },
                 "timestamp" => {
                     let ts = value.parse::<u32>()?;
                     Bson::Timestamp(Timestamp { time: ts, increment: 1 })

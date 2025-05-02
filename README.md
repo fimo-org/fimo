@@ -1,6 +1,6 @@
 # fimo (file-mongo)
 
-**Fimo** is a fast and flexible CLI tool written in Rust that transforms CSV data into MongoDB documents using YAML-based field mappings and Jinja2-style templating. It's ideal for bulk inserts, updates, and upserts with full control over document structure.
+**Fimo** is a fast and flexible CLI tool written in Rust that imports CSV file into MongoDB documents using YAML-based field mappings and Jinja2-style templating. It's ideal for bulk inserts, updates, and upserts with full control over document structure.
 
 ---
 
@@ -16,6 +16,7 @@
 - 🔐 Supports Extended JSON and BSON types
 - 🔣 Configurable CSV delimiter and quote characters
 - 📊 Debug and verbose output for development and testing
+- 📅 **NEW**: Flexible date parsing with multiple format support (e.g. ISO, MSSQL, Oracle, Go)
 
 ---
 
@@ -168,6 +169,44 @@ active:
 ```
 
 This allows more natural mapping from "yes"/"no", "Y"/"N" strings into true/false.
+
+## 🧠 Flexible Date Parsing with Custom Formats
+Fimo supports parsing date strings using custom formats, giving you the flexibility to import dates from a wide range of sources such as Oracle, MSSQL, or ISO standards.
+
+You can define multiple formats for a date field in your mapping file:
+
+```yaml
+created_at:
+  type: date
+  formats:
+    - "%Y-%m-%dT%H:%M:%S%.fZ"                # ISO 8601
+    - "%Y-%m-%d %H:%M:%S"                    # MSSQL style
+    - "%Y-%m-%d %H:%M:%S%.f"                 # Go-style (chrono-compatible)
+    - "%Y/%m/%d %H:%M"                       # Custom
+```
+Fimo will try each format in order until one matches. This makes importing data from diverse systems much easier.
+
+### ▶️ Example CSV
+```csv
+name,created_at
+Alice,2024-01-01T10:00:00Z
+Bob,2024-01-01 10:00:00
+```
+### ▶️ Corresponding Mapping
+```yaml
+name:
+  type: string
+created_at:
+  type: date
+  formats:
+    - "%Y-%m-%dT%H:%M:%S%.fZ"
+    - "%Y-%m-%d %H:%M:%S"
+```
+
+This feature leverages the chrono crate for robust and standards-compliant date parsing.
+
+> ℹ️ You can define multiple formats for a `date` field in the `formats` array. If omitted, Fimo defaults to parsing using RFC 3339 (e.g. `2024-01-01T10:00:00Z`).
+
 
 ## 📁 Project Structure
 ```pgsql
