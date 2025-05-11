@@ -1,6 +1,6 @@
-# fimo (file-mongo)
+# fimo-csv (file-mongo-csv)
 
-**Fimo** is a fast and flexible CLI tool written in Rust that imports CSV file into MongoDB documents using YAML-based field mappings and Jinja2-style templating. It's ideal for bulk inserts, updates, and upserts with full control over document structure.
+**fimo-csv** is a fast and flexible CLI tool written in Rust that imports CSV file into MongoDB documents using YAML-based field mappings and Jinja2-style templating. It's ideal for bulk inserts, updates, and upserts with full control over document structure.
 
 ---
 
@@ -23,15 +23,15 @@
 ## 📦 Installation
 
 ```bash
-cargo install fimo
+cargo install fimo-csv
 
 ```
 
 Or clone and build:
 
 ```bash
-git clone https://github.com/fimo-org/fimo.git
-cd fimo
+git clone https://github.com/fimo-org/fimo-csv.git
+cd fimo-csv
 cargo build --release
 
 ````
@@ -39,7 +39,7 @@ cargo build --release
 ## 📝 Usage
 
 ```bash
-fimo \
+fimo-csv \
   --input tests/data/extended.csv \
   --mapping tests/mapping/extended.yaml \
   --template-dir tests/templates \
@@ -94,7 +94,7 @@ active:
 
 ▶️ Run the Import
 ```bash
-fimo \
+fimo-csv \
   --input data.csv \
   --mapping mapping.yaml \
   --template-dir templates \
@@ -125,7 +125,7 @@ active:
 
 ▶️ Raw Insert Command
 ```bash
-fimo \
+fimo-csv \
   --input simple.csv \
   --mapping simple.yaml \
   --mongo-uri mongodb://localhost:27017 \
