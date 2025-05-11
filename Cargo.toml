@@ -1,10 +1,10 @@
 [package]
-name = "fimo"
+name = "fimo-csv"
 version = "0.1.1"
 edition = "2021"
 description = "A command-line tool to import CSV files into MongoDB"
 license = "MIT"
-repository = "https://github.com/fimo-org/fimo"
+repository = "https://github.com/fimo-org/fimo-csv"
 readme = "README.md"
 keywords = ["mongodb", "csv", "cli", "import"]
 categories = ["command-line-utilities", "database"]
