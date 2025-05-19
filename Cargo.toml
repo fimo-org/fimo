@@ -25,4 +25,6 @@ mongodb = "3.1.1"
 minijinja = { version = "1.0.12", features = ["builtins","loader"] }
 anyhow = "1.0"
 chrono = { version = "0.4", features = [ "serde"] }
+futures = "0.3"
+
 
