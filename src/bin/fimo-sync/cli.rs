@@ -55,4 +55,8 @@ pub struct Cli {
     /// Limit number of documents per sync batch
     #[arg(long)]
     pub limit: Option<usize>,
+
+       /// Limit number of documents per sync batch
+       #[arg(long)]
+       pub concurrency: Option<usize>,
 }

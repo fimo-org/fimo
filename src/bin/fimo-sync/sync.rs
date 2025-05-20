@@ -1,7 +1,6 @@
 // --- sync.rs ---
 use crate::cli::Cli;
 use anyhow::{anyhow, Result};
-use futures::StreamExt;
 
 use mongodb::bson::Bson;
 use mongodb::change_stream::event::OperationType;
@@ -19,14 +18,21 @@ use mongodb::{
     Client,
 };
 
+use futures::{
+    future::join_all,
+    stream::{FuturesUnordered, StreamExt},
+};
 use serde_json;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 struct SyncContext {
     source_collection: Collection<Document>,
     target_collection: Collection<Document>,
     target_client: Client,
+    is_target_mongo_8_or_higher: bool, // new
 }
 
 async fn prepare_sync_context(args: &Cli) -> Result<SyncContext> {
@@ -40,10 +46,13 @@ async fn prepare_sync_context(args: &Cli) -> Result<SyncContext> {
     let target_db = target_client.database(&args.target_db);
     let target_collection = target_db.collection::<Document>(&args.target_collection);
 
+    let is_target_mongo_8_or_higher = is_mongo_8_or_higher(&target_client).await?;
+
     Ok(SyncContext {
         source_collection,
         target_collection,
         target_client,
+        is_target_mongo_8_or_higher,
     })
 }
 
@@ -52,50 +61,77 @@ pub async fn start_sync(args: Cli) -> Result<()> {
         println!("Starting sync using change streams");
 
         let ctx = prepare_sync_context(&args).await?;
+        println!("Connected to source and target collections");
 
         let resume_token: Option<ResumeToken> = if let Some(path) = &args.resume_file {
             if Path::new(path).exists() {
+                println!("Loading resume token from {}", path);
                 let data = fs::read_to_string(path)?;
                 let token_val: ResumeToken = serde_json::from_str(&data)?;
                 Some(token_val)
             } else {
+                println!("Resume file not found at {}", path);
                 None
             }
         } else {
+            println!("No resume file specified");
             None
         };
 
-        let mut stream: ChangeStream<ChangeStreamEvent<Document>> = ctx
-            .source_collection
-            .watch()
-            .resume_after(resume_token)
-            .full_document(FullDocumentType::UpdateLookup)
-            .await?;
+        // Set up Change Stream
+        let mut stream = if let Some(token) = resume_token {
+            println!("Resuming from token: {:?}", token);
+            ctx.source_collection
+                .watch()
+                .resume_after(token)
+                .full_document(FullDocumentType::UpdateLookup)
+                .await?
+        } else {
+            println!("Starting new change stream");
+            ctx.source_collection
+                .watch()
+                .full_document(FullDocumentType::UpdateLookup)
+                .await?
+        };
 
         let mut batch: Vec<Document> = Vec::new();
         let batch_size = args.limit.unwrap_or(100);
 
+        println!("Waiting for changes...");
+
         while let Some(event) = stream.next().await {
             match event {
                 Ok(change) => {
+                    println!("Received change: {:?}", change.operation_type);
+
                     if let Some(doc) = process_change_event(&change) {
+                        println!("Document to sync: {:?}", doc);
                         batch.push(doc);
 
                         if batch.len() >= batch_size {
-                            if let Err(e) =
-                                write_to_target(&ctx.target_client, &ctx.target_collection, &batch)
-                                    .await
+                            println!("Writing batch of {} docs", batch.len());
+                            if let Err(e) = write_to_target(
+                                &ctx.target_client,
+                                &ctx.target_collection,
+                                &batch,
+                                args.concurrency.unwrap_or(10),
+                                ctx.is_target_mongo_8_or_higher,
+                            )
+                            .await
                             {
                                 eprintln!("Target write error: {}", e);
                             }
                             batch.clear();
                         }
+                    } else {
+                        println!("Ignored change (no document or unsupported operation)");
                     }
 
                     if args.store_resume {
-                        let token = change.id;
+                        let token = &change.id;
                         if let Some(path) = &args.resume_file {
-                            let serialized = serde_json::to_string(&token)?;
+                            let serialized = serde_json::to_string(token)?;
+                            println!("Saving resume token to {}", path);
                             fs::write(path, serialized)?;
                         }
                     }
@@ -108,7 +144,15 @@ pub async fn start_sync(args: Cli) -> Result<()> {
         }
 
         if !batch.is_empty() {
-            write_to_target(&ctx.target_client, &ctx.target_collection, &batch).await?;
+            println!("Writing final batch of {} docs", batch.len());
+            write_to_target(
+                &ctx.target_client,
+                &ctx.target_collection,
+                &batch,
+                args.concurrency.unwrap_or(10),
+                ctx.is_target_mongo_8_or_higher,
+            )
+            .await?;
         }
 
         Ok(())
@@ -167,7 +211,14 @@ pub async fn start_sync(args: Cli) -> Result<()> {
         }
 
         if !batch.is_empty() {
-            write_to_target(&ctx.target_client, &ctx.target_collection, &batch).await?;
+            write_to_target(
+                &ctx.target_client,
+                &ctx.target_collection,
+                &batch,
+                args.concurrency.unwrap_or(10),
+                ctx.is_target_mongo_8_or_higher,
+            )
+            .await?;
 
             if args.store_resume {
                 if let Some(max_doc) = batch.last() {
@@ -191,8 +242,8 @@ pub async fn start_sync(args: Cli) -> Result<()> {
 
 fn process_change_event(change: &ChangeStreamEvent<Document>) -> Option<Document> {
     match change.operation_type {
-        OperationType::Insert | OperationType::Replace => change.full_document.clone(),
-        OperationType::Update => {
+        OperationType::Insert | OperationType::Replace | OperationType::Update => change.full_document.clone(),
+       /* OperationType::Update => {
             if let (Some(update_desc), Some(document_key)) = (
                 change.update_description.as_ref(),
                 change.document_key.as_ref(),
@@ -205,11 +256,96 @@ fn process_change_event(change: &ChangeStreamEvent<Document>) -> Option<Document
             } else {
                 None
             }
-        }
+        } */
         _ => None,
     }
 }
 
+fn is_version_8_or_higher(version_str: &str) -> bool {
+    let parts: Vec<u32> = version_str
+        .split('.')
+        .filter_map(|x| x.parse::<u32>().ok())
+        .collect();
+    match parts.as_slice() {
+        [major, ..] if *major >= 8 => true,
+        _ => false,
+    }
+}
+
+async fn is_mongo_8_or_higher(client: &Client) -> Result<bool> {
+    let admin_db = client.database("admin");
+    let result = admin_db.run_command(doc! { "buildInfo": 1 }).await?;
+    if let Some(Bson::String(version_str)) = result.get("version") {
+        Ok(is_version_8_or_higher(version_str))
+    } else {
+        Err(anyhow!("Could not determine MongoDB version"))
+    }
+}
+
+pub async fn write_to_target(
+    client: &Client,
+    collection: &Collection<Document>,
+    docs: &[Document],
+    concurrency_limit: usize, // only used for MongoDB < 8
+    is_mongo_8_or_higher: bool,
+) -> Result<()> {
+    if is_mongo_8_or_higher {
+        println!("Using bulk_write (MongoDB 8+)");
+
+        let models: Vec<ReplaceOneModel> = docs
+            .iter()
+            .filter_map(|doc| {
+                doc.get("_id").map(|id| {
+                    ReplaceOneModel::builder()
+                        .namespace(collection.namespace())
+                        .filter(doc! {"_id": id.clone()})
+                        .replacement(doc.clone())
+                        .upsert(true)
+                        .build()
+                })
+            })
+            .collect();
+
+        let _result = client.bulk_write(models).await?;
+    } else {
+        println!(
+            "Using concurrent per-doc replace_one (MongoDB < 8, concurrency = {})",
+            concurrency_limit
+        );
+        let semaphore = Arc::new(Semaphore::new(concurrency_limit));
+        let mut tasks = FuturesUnordered::new();
+
+        for doc in docs.iter().cloned() {
+            if let Some(id) = doc.get("_id").cloned() {
+                let collection = collection.clone();
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+
+                tasks.push(tokio::spawn(async move {
+                    let _permit = permit; // keep permit alive during execution
+                    let filter = doc! { "_id": id };
+
+                    match collection.replace_one(filter, doc).upsert(true).await {
+                        Ok(_) => Ok(()),
+                        Err(e) => {
+                            eprintln!("Per-doc write error: {}", e);
+                            Err(e)
+                        }
+                    }
+                }));
+            }
+        }
+
+        // Wait for all tasks to finish
+        while let Some(res) = tasks.next().await {
+            if let Err(e) = res {
+                eprintln!("Task join error: {}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+/*
 async fn write_to_target(
     client: &Client,
     collection: &Collection<Document>,
@@ -232,3 +368,4 @@ async fn write_to_target(
     let result = client.bulk_write(models).await?;
     Ok(result)
 }
+ */
