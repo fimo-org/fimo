@@ -93,7 +93,7 @@ A new utility designed to move large volumes of archived MongoDB documents to ex
 
 - BSON/Extended JSON export
 - Filtered and range-based archival (e.g., by date)
-- Compatibility with MongoDB Online Archive or cold storage solutions
+- Compatibility with cold storage solutions
 - Future support for rehydration into live collections
 
 ---
