@@ -1,6 +1,6 @@
 [package]
 name = "fimo"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "A command-line tool to import CSV files into MongoDB"
 license = "MIT"

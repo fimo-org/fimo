@@ -56,7 +56,11 @@ pub struct Cli {
     #[arg(long)]
     pub limit: Option<usize>,
 
-       /// Limit number of documents per sync batch
-       #[arg(long)]
-       pub concurrency: Option<usize>,
+    /// Limit number of documents per sync batch
+    #[arg(long)]
+    pub concurrency: Option<usize>,
+
+    /// Path to the health file (token or field value)
+    #[arg(long)]
+    pub health_file: Option<String>,
 }

@@ -22,17 +22,26 @@ use futures::{
     future::join_all,
     stream::{FuturesUnordered, StreamExt},
 };
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
+use tokio::time::{sleep, Duration};
+
+#[derive(Serialize, Deserialize)]
+struct ResumeCheckpoint {
+    value: Bson,
+    _id: Bson,
+}
 
 struct SyncContext {
+    health_file: Option<String>,
     source_collection: Collection<Document>,
     target_collection: Collection<Document>,
     target_client: Client,
-    is_target_mongo_8_or_higher: bool, // new
+    is_target_mongo_8_or_higher: bool,
 }
 
 async fn prepare_sync_context(args: &Cli) -> Result<SyncContext> {
@@ -48,7 +57,10 @@ async fn prepare_sync_context(args: &Cli) -> Result<SyncContext> {
 
     let is_target_mongo_8_or_higher = is_mongo_8_or_higher(&target_client).await?;
 
+    let health_file = &args.health_file;
+
     Ok(SyncContext {
+        health_file: health_file.clone(),
         source_collection,
         target_collection,
         target_client,
@@ -78,7 +90,6 @@ pub async fn start_sync(args: Cli) -> Result<()> {
             None
         };
 
-        // Set up Change Stream
         let mut stream = if let Some(token) = resume_token {
             println!("Resuming from token: {:?}", token);
             ctx.source_collection
@@ -102,37 +113,33 @@ pub async fn start_sync(args: Cli) -> Result<()> {
         while let Some(event) = stream.next().await {
             match event {
                 Ok(change) => {
-                    println!("Received change: {:?}", change.operation_type);
-
                     if let Some(doc) = process_change_event(&change) {
-                        println!("Document to sync: {:?}", doc);
                         batch.push(doc);
 
                         if batch.len() >= batch_size {
-                            println!("Writing batch of {} docs", batch.len());
-                            if let Err(e) = write_to_target(
+                            write_to_target(
                                 &ctx.target_client,
                                 &ctx.target_collection,
                                 &batch,
                                 args.concurrency.unwrap_or(10),
                                 ctx.is_target_mongo_8_or_higher,
                             )
-                            .await
-                            {
-                                eprintln!("Target write error: {}", e);
-                            }
+                            .await?;
                             batch.clear();
-                        }
-                    } else {
-                        println!("Ignored change (no document or unsupported operation)");
-                    }
 
-                    if args.store_resume {
-                        let token = &change.id;
-                        if let Some(path) = &args.resume_file {
-                            let serialized = serde_json::to_string(token)?;
-                            println!("Saving resume token to {}", path);
-                            fs::write(path, serialized)?;
+                            if let Some(ref path) = &ctx.health_file {
+                                fs::write(
+                                    path,
+                                    format!("{}", chrono::Utc::now().timestamp_millis()),
+                                )?;
+                            }
+
+                            if args.store_resume {
+                                if let Some(path) = &args.resume_file {
+                                    let serialized = serde_json::to_string(&change.id)?;
+                                    fs::write(path, serialized)?;
+                                }
+                            }
                         }
                     }
                 }
@@ -144,7 +151,6 @@ pub async fn start_sync(args: Cli) -> Result<()> {
         }
 
         if !batch.is_empty() {
-            println!("Writing final batch of {} docs", batch.len());
             write_to_target(
                 &ctx.target_client,
                 &ctx.target_collection,
@@ -153,6 +159,9 @@ pub async fn start_sync(args: Cli) -> Result<()> {
                 ctx.is_target_mongo_8_or_higher,
             )
             .await?;
+            if let Some(ref path) = &ctx.health_file {
+                fs::write(path, format!("{}", chrono::Utc::now().timestamp_millis()))?;
+            }
         }
 
         Ok(())
@@ -161,78 +170,114 @@ pub async fn start_sync(args: Cli) -> Result<()> {
 
         let ctx = prepare_sync_context(&args).await?;
 
-        let resume_bson: Option<Bson> = if let Some(path) = &args.resume_file {
+        let mut resume_value: Option<Bson> = None;
+        let mut last_id: Option<Bson> = None;
+
+        if let Some(path) = &args.resume_file {
             if Path::new(path).exists() {
                 let data = fs::read_to_string(path)?;
-                let parsed: Bson = serde_json::from_str(&data)?;
-                Some(parsed)
-            } else {
-                None
-            }
-        } else if let Some(val) = &args.resume_value {
-            match args.resume_type.as_deref() {
-                Some("int") => val.parse::<i64>().ok().map(Bson::Int64),
-                Some("objectid") => mongodb::bson::oid::ObjectId::parse_str(val)
-                    .ok()
-                    .map(Bson::ObjectId),
-                Some("date") => mongodb::bson::DateTime::parse_rfc3339_str(val)
-                    .ok()
-                    .map(Bson::DateTime),
-                Some("string") | None => Some(Bson::String(val.clone())),
-                Some(t) => return Err(anyhow!(format!("Unsupported resume_type '{}'", t))),
-            }
-        } else {
-            None
-        };
-
-        let filter = if let Some(val) = resume_bson {
-            doc! { field: { "$gt": val } }
-        } else {
-            doc! {}
-        };
-
-        let mut cursor = ctx
-            .source_collection
-            .find(filter)
-            .sort(doc! { field: 1 })
-            .limit(args.limit.unwrap_or(100) as i64)
-            .await?;
-        let mut batch: Vec<Document> = Vec::new();
-
-        while let Some(doc) = cursor.next().await {
-            match doc {
-                Ok(document) => {
-                    batch.push(document);
-                }
-                Err(e) => {
-                    eprintln!("Document error: {}", e);
-                }
+                let checkpoint: ResumeCheckpoint = serde_json::from_str(&data)?;
+                resume_value = Some(checkpoint.value);
+                last_id = Some(checkpoint._id);
             }
         }
 
-        if !batch.is_empty() {
-            write_to_target(
-                &ctx.target_client,
-                &ctx.target_collection,
-                &batch,
-                args.concurrency.unwrap_or(10),
-                ctx.is_target_mongo_8_or_higher,
-            )
-            .await?;
+        let mut delay = 10_000;
+        let max_delay = 60_000;
 
-            if args.store_resume {
-                if let Some(max_doc) = batch.last() {
-                    if let Some(val) = max_doc.get(field) {
-                        if let Some(path) = &args.resume_file {
-                            let serialized = serde_json::to_string(val)?;
-                            fs::write(path, serialized)?;
-                        }
+        loop {
+            let filter = if let Some(value) = &resume_value {
+                if field == "_id" {
+                    doc! { field: { "$gt": value.clone() } }
+                } else {
+                    doc! {
+                        "$or": [
+                            { field: { "$gt": value.clone() } },
+                            { "$and": [ { field: value.clone() }, { "_id": { "$gt": last_id.clone().unwrap() } } ] }
+                        ]
+                    }
+                }
+            } else {
+                doc! {}
+            };
+
+            let sort = if field == "_id" {
+                doc! { field: 1 }
+            } else {
+                doc! { field: 1, "_id": 1 }
+            };
+
+            let mut cursor = ctx
+                .source_collection
+                .find(filter)
+                .sort(sort)
+                .limit(args.limit.unwrap_or(100) as i64)
+                .await?;
+
+            let mut batch: Vec<Document> = Vec::new();
+            let mut last_doc: Option<Document> = None;
+
+            while let Some(doc) = cursor.next().await {
+                match doc {
+                    Ok(document) => {
+                        batch.push(document.clone());
+                        last_doc = Some(document);
+                    }
+                    Err(e) => {
+                        eprintln!("Document error: {}", e);
                     }
                 }
             }
-        }
 
-        Ok(())
+            if !batch.is_empty() {
+                write_to_target(
+                    &ctx.target_client,
+                    &ctx.target_collection,
+                    &batch,
+                    args.concurrency.unwrap_or(10),
+                    ctx.is_target_mongo_8_or_higher,
+                )
+                .await?;
+                if let Some(ref path) = &ctx.health_file {
+                    fs::write(path, format!("{}", chrono::Utc::now().timestamp_millis()))?;
+                }
+
+                if let Some(doc) = &last_doc {
+                    if field == "_id" {
+                        if let Some(id) = doc.get_object_id("_id").ok() {
+                            resume_value = Some(Bson::ObjectId(id));
+                            let serialized = serde_json::to_string(&ResumeCheckpoint {
+                                value: Bson::ObjectId(id.clone()),
+                                _id: Bson::ObjectId(id),
+                            })?;
+                            if let Some(path) = &args.resume_file {
+                                fs::write(path, serialized)?;
+                            }
+                        }
+                    } else {
+                        if let (Some(value), Some(id)) =
+                            (doc.get(field), doc.get_object_id("_id").ok())
+                        {
+                            resume_value = Some(value.clone());
+                            last_id = Some(Bson::ObjectId(id.clone()));
+                            let checkpoint = ResumeCheckpoint {
+                                value: value.clone(),
+                                _id: Bson::ObjectId(id.clone()),
+                            };
+                            if let Some(path) = &args.resume_file {
+                                let serialized = serde_json::to_string(&checkpoint)?;
+                                fs::write(path, serialized)?;
+                            }
+                        }
+                    }
+                }
+                delay = 10_000;
+            } else {
+                println!("⏳ No new data. Sleeping for {} ms...", delay);
+                sleep(Duration::from_millis(delay)).await;
+                delay = std::cmp::min(delay * 2, max_delay);
+            }
+        }
     } else {
         Err(anyhow!(
             "Either --use-change-stream or --sync-field must be provided"
@@ -242,21 +287,9 @@ pub async fn start_sync(args: Cli) -> Result<()> {
 
 fn process_change_event(change: &ChangeStreamEvent<Document>) -> Option<Document> {
     match change.operation_type {
-        OperationType::Insert | OperationType::Replace | OperationType::Update => change.full_document.clone(),
-       /* OperationType::Update => {
-            if let (Some(update_desc), Some(document_key)) = (
-                change.update_description.as_ref(),
-                change.document_key.as_ref(),
-            ) {
-                let mut doc = document_key.clone();
-                for (k, v) in update_desc.updated_fields.iter() {
-                    doc.insert(k, v.clone());
-                }
-                Some(doc)
-            } else {
-                None
-            }
-        } */
+        OperationType::Insert | OperationType::Replace | OperationType::Update => {
+            change.full_document.clone()
+        }
         _ => None,
     }
 }
@@ -266,10 +299,7 @@ fn is_version_8_or_higher(version_str: &str) -> bool {
         .split('.')
         .filter_map(|x| x.parse::<u32>().ok())
         .collect();
-    match parts.as_slice() {
-        [major, ..] if *major >= 8 => true,
-        _ => false,
-    }
+    matches!(parts.as_slice(), [major, ..] if *major >= 8)
 }
 
 async fn is_mongo_8_or_higher(client: &Client) -> Result<bool> {
@@ -286,12 +316,10 @@ pub async fn write_to_target(
     client: &Client,
     collection: &Collection<Document>,
     docs: &[Document],
-    concurrency_limit: usize, // only used for MongoDB < 8
+    concurrency_limit: usize,
     is_mongo_8_or_higher: bool,
 ) -> Result<()> {
     if is_mongo_8_or_higher {
-        println!("Using bulk_write (MongoDB 8+)");
-
         let models: Vec<ReplaceOneModel> = docs
             .iter()
             .filter_map(|doc| {
@@ -305,13 +333,8 @@ pub async fn write_to_target(
                 })
             })
             .collect();
-
-        let _result = client.bulk_write(models).await?;
+        client.bulk_write(models).await?;
     } else {
-        println!(
-            "Using concurrent per-doc replace_one (MongoDB < 8, concurrency = {})",
-            concurrency_limit
-        );
         let semaphore = Arc::new(Semaphore::new(concurrency_limit));
         let mut tasks = FuturesUnordered::new();
 
@@ -321,9 +344,8 @@ pub async fn write_to_target(
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
 
                 tasks.push(tokio::spawn(async move {
-                    let _permit = permit; // keep permit alive during execution
+                    let _permit = permit;
                     let filter = doc! { "_id": id };
-
                     match collection.replace_one(filter, doc).upsert(true).await {
                         Ok(_) => Ok(()),
                         Err(e) => {
@@ -335,7 +357,6 @@ pub async fn write_to_target(
             }
         }
 
-        // Wait for all tasks to finish
         while let Some(res) = tasks.next().await {
             if let Err(e) = res {
                 eprintln!("Task join error: {}", e);
@@ -345,27 +366,3 @@ pub async fn write_to_target(
 
     Ok(())
 }
-/*
-async fn write_to_target(
-    client: &Client,
-    collection: &Collection<Document>,
-    docs: &[Document],
-) -> Result<SummaryBulkWriteResult> {
-    let models: Vec<ReplaceOneModel> = docs
-        .iter()
-        .filter_map(|doc| {
-            doc.get("_id").map(|id| {
-                ReplaceOneModel::builder()
-                    .namespace(collection.namespace())
-                    .filter(doc! {"_id": id.clone()})
-                    .replacement(doc.clone())
-                    .upsert(true)
-                    .build()
-            })
-        })
-        .collect();
-
-    let result = client.bulk_write(models).await?;
-    Ok(result)
-}
- */
